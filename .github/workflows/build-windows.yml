@@ -1,0 +1,112 @@
+---
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-windows:
+    name: Build Windows Game
+    runs-on: windows-2022
+    env:
+      BUILD_TOOLS_PATH: C:\apps\build-tools\
+      CONAN_USER_HOME_SHORT: None
+    
+    steps:
+      - name: Add build tools to PATH
+        run: echo $env:BUILD_TOOLS_PATH | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Build tools
+        run: git clone https://git.anotherfoxguy.com/AnotherFoxGuy/build-tools.git %BUILD_TOOLS_PATH%
+        shell: cmd
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          key: conan-windows-${{ hashFiles('conanfile.py') }}
+          path: ~/.conan2
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.12.1
+
+      - name: Configure Conan
+        run: |
+          conan profile detect --force
+          conan remote add rigs-of-rods-deps https://conan.cloudsmith.io/rigs-of-rods/deps/ -f
+        shell: cmd
+
+      - name: Install dependencies with Conan
+        run: conan install . -b missing -pr:b=tools/conan-profiles/vs-22-release-ninja -pr=tools/conan-profiles/vs-22-release-ninja -of build
+        shell: cmd
+
+      - name: Configure CMake
+        run: cmake --preset conan-release -DCMAKE_INSTALL_PREFIX=redist -DCREATE_CONTENT_FOLDER=ON
+        shell: cmd
+
+      - name: Build with Ninja
+        run: |
+          cd build
+          ninja
+        shell: cmd
+
+      - name: Prepare distribution folder
+        shell: cmd
+        run: |
+          mkdir dist-package
+          xcopy /E /I /Y bin\Release dist-package\bin\Release
+          xcopy /E /I /Y config dist-package\config
+          xcopy /E /I /Y data dist-package\data
+          copy License.txt dist-package\
+          copy Readme.md dist-package\
+          if exist redist xcopy /E /I /Y redist dist-package\redist
+          if exist dist\plugins_Windows.cfg copy dist\plugins_Windows.cfg dist-package\bin\Release\plugins.cfg
+          if exist dist\resources2.cfg copy dist\resources2.cfg dist-package\bin\Release\resources.cfg
+
+      - name: Upload Windows binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: StuntRally3-Windows-Binaries
+          path: bin/Release/
+          retention-days: 30
+
+      - name: Upload complete package (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: StuntRally3-Windows-Complete
+          path: dist-package/
+          retention-days: 30
+
+      - name: Build Inno Setup installer (if Inno Setup is available)
+        shell: cmd
+        continue-on-error: true
+        run: |
+          where iscc >nul 2>&1
+          if %ERRORLEVEL% == 0 (
+            echo Inno Setup found, building installer...
+            mkdir installer-build
+            iscc /DMyAppVersion=3.3 /Oinstaller-build dist\installer.iss
+          ) else (
+            echo Inno Setup not available, skipping installer build
+          )
+
+      - name: Upload installer (if built)
+        uses: actions/upload-artifact@v4
+        if: success() && exists('installer-build/')
+        with:
+          name: StuntRally3-Installer
+          path: installer-build/
+          retention-days: 30
+
+      - name: Clean Conan cache
+        if: always()
+        run: conan cache clean "*" -sbd
+        shell: cmd
